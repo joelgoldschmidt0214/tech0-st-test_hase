@@ -38,7 +38,7 @@ st.html("<p><span style='text-decoration: line-through double red;'>Oops</span>!
 
 # ----------------------------
 # DataFrame Example with Random Data
-df = pd.DataFrame(np.random.randn(50, 20), columns=("col %d" % i for i in range(20)))
+df = pd.DataFrame(np.random.randn(50, 20), columns=list("col %d" % i for i in range(20)))
 st.dataframe(df)
 
 # ----------------------------
