@@ -3,104 +3,136 @@ import requests
 import pandas as pd
 from datetime import datetime
 import xml.etree.ElementTree as ET
+import logging # エラーログ用に追加
 
-# --- 地点定義データの取得と処理 (XML対応) ---
+# --- 定数 ---
 PRIMARY_AREA_URL = "https://weather.tsukumijima.net/primary_area.xml"
+WEATHER_API_URL_BASE = "https://weather.tsukumijima.net/api/forecast/city/"
+DEFAULT_PREF = "東京都"
+DEFAULT_CITY = "東京"
+CACHE_TTL = 3600 # キャッシュ有効期間（秒）
 
-@st.cache_data(ttl=3600)
+# --- ロギング設定 ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- データ取得関数 (キャッシュ付き) ---
+@st.cache_data(ttl=CACHE_TTL)
 def get_location_data_from_xml():
     """地点定義XMLを取得してパースし、JSONライクな構造に変換する"""
     try:
-        response = requests.get(PRIMARY_AREA_URL)
+        response = requests.get(PRIMARY_AREA_URL, timeout=10) # タイムアウト追加
         response.raise_for_status()
         response.encoding = response.apparent_encoding
         root = ET.fromstring(response.text)
+
         location_list = []
         for pref_elem in root.findall('.//pref'):
             pref_name = pref_elem.get('title')
             if not pref_name: continue
+
             cities_list = []
             for city_elem in pref_elem.findall('./city'):
                 city_id = city_elem.get('id')
                 city_name = city_elem.get('title')
                 if city_id and city_name:
                     cities_list.append({'id': city_id, 'name': city_name})
+
             if cities_list:
                 location_list.append({'name': pref_name, 'cities': cities_list})
+
+        logging.info("地点情報を正常に取得・パースしました。")
         return location_list
+
+    except requests.exceptions.Timeout:
+        logging.error(f"地点情報の取得がタイムアウトしました: {PRIMARY_AREA_URL}")
+        st.error("地点情報の取得がタイムアウトしました。しばらくしてから再試行してください。")
+        return None
     except requests.exceptions.RequestException as e:
+        logging.error(f"地点情報の取得に失敗しました: {e}")
         st.error(f"地点情報の取得に失敗しました: {e}")
         return None
     except ET.ParseError as e:
-        st.error(f"地点情報のXMLパースに失敗しました: {e}")
+        logging.error(f"地点情報のXMLパースに失敗しました: {e}")
+        st.error(f"地点情報のXMLパースに失敗しました。")
         return None
     except Exception as e:
-        st.error(f"地点情報の処理中に予期せぬエラーが発生しました: {e}")
+        logging.error(f"地点情報の処理中に予期せぬエラーが発生しました: {e}", exc_info=True)
+        st.error(f"地点情報の処理中に予期せぬエラーが発生しました。")
         return None
 
-# --- ここからメイン処理 ---
-location_data = get_location_data_from_xml()
-
-if location_data:
-    # 都道府県リストを作成
-    prefecture_list = [pref['name'] for pref in location_data]
-
-    # --- デフォルト値の設定 ---
-    DEFAULT_PREF = "東京都"
-    DEFAULT_CITY = "東京"
-
-    # デフォルト都道府県のインデックスを探す
+def get_weather_forecast(city_code):
+    """指定されたcity_codeの天気予報を取得する"""
+    url = f"{WEATHER_API_URL_BASE}{city_code}"
     try:
-        default_pref_index = prefecture_list.index(DEFAULT_PREF)
-    except ValueError:
-        st.warning(f"デフォルトの都道府県 '{DEFAULT_PREF}' が見つかりません。リストの先頭を使用します。")
-        default_pref_index = 0 # 見つからなければ先頭(0)をデフォルトにする
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        logging.info(f"天気予報を正常に取得しました: city_code={city_code}")
+        return response.json()
+    except requests.exceptions.Timeout:
+        logging.error(f"天気予報の取得がタイムアウトしました: {url}")
+        st.error("天気予報の取得がタイムアウトしました。しばらくしてから再試行してください。")
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"天気予報の取得に失敗しました: {e}")
+        st.error(f"天気予報の取得に失敗しました: {e}")
+        return None
+    except Exception as e: # JSONDecodeErrorなども拾う
+        logging.error(f"天気予報の処理中に予期せぬエラーが発生しました: {e}", exc_info=True)
+        st.error(f"天気予報の処理中に予期せぬエラーが発生しました。")
+        return None
 
-    # --- Streamlit UI ---
+# --- Streamlit アプリケーション ---
+def main():
+    st.set_page_config(page_title="天気アプリ", layout="wide") # ページ設定
     st.title("天気アプリ")
     st.write("調べたい地域を選んでください。")
 
-    # 1. 都道府県選択 (indexを指定してデフォルト値を設定)
+    location_data = get_location_data_from_xml()
+
+    if not location_data:
+        st.error("アプリケーションを初期化できません。地点情報を取得できませんでした。")
+        return # 地点情報がなければ処理中断
+
+    prefecture_list = [pref['name'] for pref in location_data]
+
+    try:
+        default_pref_index = prefecture_list.index(DEFAULT_PREF)
+    except ValueError:
+        logging.warning(f"デフォルト都道府県 '{DEFAULT_PREF}' が見つかりません。リストの先頭を使用します。")
+        default_pref_index = 0
+
     selected_prefecture_name = st.selectbox(
         "都道府県を選んでください。",
         prefecture_list,
-        index=default_pref_index # ここでデフォルトインデックスを指定
+        index=default_pref_index
     )
 
-    # 2. 地域選択
     selected_cities = []
     city_list = []
-    default_city_index = 0 # 地域のデフォルトインデックス初期値
+    default_city_index = 0
 
     if selected_prefecture_name:
-        # 選択された都道府県のcitiesリストを検索
         for pref_data in location_data:
             if pref_data['name'] == selected_prefecture_name:
                 selected_cities = pref_data['cities']
                 city_list = [city['name'] for city in selected_cities]
-
-                # --- 選択された都道府県がデフォルト都道府県の場合のみ、デフォルト地域を探す ---
                 if selected_prefecture_name == DEFAULT_PREF:
                     try:
                         default_city_index = city_list.index(DEFAULT_CITY)
                     except ValueError:
-                        st.warning(f"'{selected_prefecture_name}' 内にデフォルトの地域 '{DEFAULT_CITY}' が見つかりません。リストの先頭を使用します。")
-                        default_city_index = 0 # 見つからなければ先頭(0)
+                        logging.warning(f"'{selected_prefecture_name}' 内のデフォルト地域 '{DEFAULT_CITY}' が見つかりません。リストの先頭を使用します。")
+                        default_city_index = 0
                 else:
-                    # デフォルト都道府県以外が選択された場合は、地域のデフォルトは先頭(0)にする
                     default_city_index = 0
-                break # 都道府県が見つかったらループを抜ける
+                break
 
-    # 地域selectbox (indexを指定してデフォルト値を設定)
-    # keyを設定して、都道府県が変わったときに地域selectboxの状態をリセットさせる
     selected_city_name = st.selectbox(
         "地域を選んでください。",
         city_list,
-        index=default_city_index, # デフォルトインデックスを指定
-        key=f"city_selectbox_{selected_prefecture_name}" # 都道府県名に基づいてキーを動的に変更
+        index=default_city_index,
+        key=f"city_selectbox_{selected_prefecture_name}" # 都道府県変更時のリセット用キー
     )
 
-    # 3. City Code取得 (ここからは変更なし)
     city_code = None
     if selected_city_name and selected_cities:
         for city_data in selected_cities:
@@ -108,77 +140,76 @@ if location_data:
                 city_code = city_data['id']
                 break
 
-    if city_code:
-        st.write(f"選択中の地域: {selected_prefecture_name} - {selected_city_name} (コード: {city_code})")
+    if not city_code:
+        st.warning("地域を選択してください、または選択した地域のコードが見つかりません。")
+        return # City Codeがなければ処理中断
 
-        # --- 天気予報の取得と表示 (変更なし) ---
-        # ... (前のコードと同じ天気予報表示処理) ...
-        url = f"https://weather.tsukumijima.net/api/forecast/city/{city_code}"
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            weather_json = response.json()
+    st.write(f"**選択中の地域:** {selected_prefecture_name} - {selected_city_name} (コード: {city_code})")
+    st.divider() # 区切り線
 
-            # 現在の降水確率
-            now_hour = datetime.now().hour
-            weather_now = '--'
-            if 'forecasts' in weather_json and len(weather_json['forecasts']) > 0 and 'chanceOfRain' in weather_json['forecasts'][0] and weather_json['forecasts'][0]['chanceOfRain']:
-                cor = weather_json['forecasts'][0]['chanceOfRain']
-                if cor:
-                    time_slots = {'T00_06': (0, 6), 'T06_12': (6, 12), 'T12_18': (12, 18), 'T18_24': (18, 24)}
-                    for key, (start, end) in time_slots.items():
-                        if start <= now_hour < end:
-                           weather_now = cor.get(key, '--')
-                           break
-                    # 24時以降（日付が変わる直前）の場合
-                    if now_hour >= 24 or now_hour < 0 : # 通常ありえないが念のため
-                         weather_now = cor.get('T18_24', '--') # 深夜は18-24の区分とするか、要件次第
+    weather_json = get_weather_forecast(city_code)
 
-            st.write(f"現在の降水確率: {weather_now if weather_now is not None else '--'}")
+    if not weather_json:
+        # get_weather_forecast内でエラー表示済みなのでここでは何もしないか、追加メッセージ
+        # st.error("天気予報データを取得できませんでした。")
+        return # 天気情報がなければ処理中断
 
-            # DataFrame表示
-            data = []
-            index_labels = ["今日", "明日", "明後日"]
-            if 'forecasts' in weather_json:
-                num_forecasts = len(weather_json['forecasts'])
-                days_to_show = min(num_forecasts, 3)
+    # --- 現在の降水確率表示 ---
+    st.subheader("現在の降水確率")
+    now_hour = datetime.now().hour
+    weather_now = '--'
+    forecast_today = weather_json.get('forecasts', [{}])[0] # 今日の予報を安全に取得
+    chance_of_rain_today = forecast_today.get('chanceOfRain')
 
-                for i in range(days_to_show):
-                    forecast = weather_json['forecasts'][i]
-                    if 'chanceOfRain' in forecast and forecast['chanceOfRain'] is not None:
-                        chance_of_rain = forecast['chanceOfRain']
-                        rain_probabilities = [
-                            chance_of_rain.get('T00_06', '--'),
-                            chance_of_rain.get('T06_12', '--'),
-                            chance_of_rain.get('T12_18', '--'),
-                            chance_of_rain.get('T18_24', '--')
-                        ]
-                        data.append(rain_probabilities)
-                    else:
-                        data.append(['--'] * 4)
+    if chance_of_rain_today: # Noneでないことを確認
+        time_slots = {'T00_06': (0, 6), 'T06_12': (6, 12), 'T12_18': (12, 18), 'T18_24': (18, 24)}
+        found_slot = False
+        for key, (start, end) in time_slots.items():
+            # now_hourが24時以降になることは通常ないが、ロジックとして18-24に含める
+            current_hour_in_slot = (start <= now_hour < end) or (key == 'T18_24' and now_hour >= end)
+            if current_hour_in_slot:
+                weather_now = chance_of_rain_today.get(key, '--')
+                found_slot = True
+                break
+        # どのスロットにも当てはまらない場合（通常ありえないが念のため）
+        if not found_slot and now_hour >= 0:
+             weather_now = chance_of_rain_today.get('T18_24', '--') # フォールバックとして最後の時間帯
 
-                if data:
-                    df = pd.DataFrame(
-                        data,
-                        index=index_labels[:days_to_show],
-                        columns=['0-6時', '6-12時', '12-18時', '18-24時']
-                    )
-                    st.dataframe(df)
-                else:
-                     st.warning("降水確率データを表示できませんでした。")
-            else:
-                st.warning("天気予報データが見つかりません。")
+    st.metric(label="現在時刻の含まれる時間帯", value=f"{weather_now}")
+    st.divider() # 区切り線
 
-        except requests.exceptions.RequestException as e:
-            st.error(f"天気予報の取得に失敗しました: {e}")
-        except Exception as e:
-            st.error(f"天気予報の処理中にエラーが発生しました: {e}")
+    # --- 3日間の降水確率DataFrame表示 ---
+    st.subheader("時間帯別 降水確率")
+    data = []
+    index_labels = ["今日", "明日", "明後日"]
+    forecasts = weather_json.get('forecasts', [])
+    days_to_show = min(len(forecasts), 3)
 
+    for i in range(days_to_show):
+        forecast = forecasts[i]
+        chance_of_rain = forecast.get('chanceOfRain')
+        if chance_of_rain:
+            rain_probabilities = [
+                chance_of_rain.get('T00_06', '--'),
+                chance_of_rain.get('T06_12', '--'),
+                chance_of_rain.get('T12_18', '--'),
+                chance_of_rain.get('T18_24', '--')
+            ]
+            data.append(rain_probabilities)
+        else:
+            logging.warning(f"{index_labels[i]} の降水確率データ(chanceOfRain)が見つかりません。city_code={city_code}")
+            data.append(['--'] * 4)
+
+    if data:
+        df = pd.DataFrame(
+            data,
+            index=index_labels[:days_to_show],
+            columns=['0-6時', '6-12時', '12-18時', '18-24時']
+        )
+        st.dataframe(df, use_container_width=True) # コンテナ幅に合わせる
     else:
-        if selected_prefecture_name and selected_city_name:
-             st.warning(f"選択された地域 ({selected_city_name}) のコードが見つかりませんでした。")
-        # else: # 初期表示時などはメッセージ不要な場合もある
-        #      st.info("都道府県と地域を選択してください。")
+        st.warning("降水確率データを表示できませんでした。")
 
-else:
-    st.error("アプリケーションの初期化に失敗しました。地点情報を取得できません。")
+
+if __name__ == "__main__":
+    main()
